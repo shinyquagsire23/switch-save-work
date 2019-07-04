@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <dirent.h>
+#include "dirent.h"
 #include <openssl/aes.h> 
 #include <openssl/cmac.h>
 
@@ -11,22 +11,37 @@
 
 u32 forced_lookup_table[64] = { 0 };
 
+// all little-endian, be sure to use getle32/etc to be safe
+typedef struct {
+	u32 product_version;
+	u32 develop_version;
+	u32 crc32;
+	u32 pad;
+} save_header;
+
+typedef struct {
+	u8 iv[16];
+	u32 rand[4]; // random ctx used to generate keys
+	u8 aes_cmac[16];
+} save_cryptinfo;
+
 struct mm_file_type
 {
 	char* name;
 	char* fileName;
 	size_t fileSize;
-	size_t offset;
-	uint32_t* key_table;
+	u32 develop_version;
+	u32* key_table;
 };
 
 struct mm_file_type file_types[] = {
-	{ "save", "save.dat", 0xC000, 0x0, save_key_table },
-	{ "quest", "quest.dat", 0xC000, 0x0, quest_key_table },
-	{ "later", "later.dat", 0xC000, 0x0, later_key_table },
+	{ "save", "save.dat", 0xC000, 0x0B, save_key_table },
+	{ "quest", "quest.dat", 0xC000, 0x01, quest_key_table },
+	{ "later", "later.dat", 0xC000, 0x0A, later_key_table },
 	{ "replay", ".dat", 0x68000, 0x0, replay_key_table },
-	{ "network", "network.dat", 0x48000, 0x0, network_key_table },
+	{ "network", "network.dat", 0x48000, 0x08, network_key_table },
 	{ "thumb", ".btl", 0x1C000, 0x0, thumb_key_table },
+	{ "thumb", ".jpg", 0x1C000, 0x0, thumb_key_table },
 	{ "course", ".bcd", 0x5C000, 0x10, course_key_table }
 };
 
@@ -77,7 +92,7 @@ bool is_empty(const u8* ptr, size_t size)
 	return true;
 }
 
-u32* get_lookup_table(const char* fileName, size_t size)
+u32* get_lookup_table(const char* fileName, size_t size, save_header* header, bool is_encrypting, int* offset)
 {
 	if (!is_empty(forced_lookup_table, sizeof(forced_lookup_table)))
 	{
@@ -85,15 +100,59 @@ u32* get_lookup_table(const char* fileName, size_t size)
 		return forced_lookup_table;
 	}
 
+	if (is_encrypting)
+	{
+		size += 0x30;
+	}
+
 	for (int i = 0; i < sizeof(file_types) / sizeof(struct mm_file_type); i++)
 	{
-		if (file_types[i].fileSize == size && ends_with(fileName, file_types[i].fileName))
+		if (file_types[i].fileSize == (size + (file_types[i].develop_version && is_encrypting ? 0x10 : 0)) && ends_with(fileName, file_types[i].fileName))
 		{
+			if (is_encrypting && file_types[i].develop_version)
+			{
+				header->product_version = 1;
+				header->develop_version = file_types[i].develop_version;
+				header->crc32 = 0;
+				header->pad = 0;
+			}
+
+			if (file_types[i].develop_version && offset)
+			{
+				*offset = 0x10;
+			}
+
+			if (!is_encrypting && file_types[i].develop_version)
+			{
+				if (header->product_version != 1)
+				{
+					printf("Unrecognized save version %d!\n", header->product_version);
+				}
+
+				if (header->develop_version != file_types[i].develop_version)
+				{
+					printf("Unrecognized develop version %d, expected %d!\n", header->develop_version, file_types[i].develop_version);
+				}
+			}
+
 			printf("using %s lookup table.\n", file_types[i].name);
 			return file_types[i].key_table;
 		}
 	}
 
+	if (!is_encrypting && header && header->product_version == 1)
+	{
+		for (int i = 0; i < sizeof(file_types) / sizeof(struct mm_file_type); i++)
+		{
+			if (file_types[i].develop_version && file_types[i].develop_version == header->develop_version)
+			{
+				printf("using %s lookup table.\n", file_types[i].name);
+				return file_types[i].key_table;
+			}
+		}
+	}
+
+	printf("fatal error: unable to get LUT!\n");
 	return forced_lookup_table;
 }
 
@@ -141,20 +200,6 @@ void generate_randkey(u32 rand[4], u8 key[16], u32* lookup_table)
     }
 }
 
-// all little-endian, be sure to use getle32/etc to be safe
-typedef struct {
-    u32 product_version;
-    u32 develop_version;
-    u32 crc32;
-    u32 pad;
-} save_header;
-
-typedef struct {
-    u8 iv[16];
-    u32 rand[4]; // random ctx used to generate keys
-    u8 aes_cmac[16];
-} save_cryptinfo;
-
 void do_body_cmac(u8 *save_body, uint64_t body_size, u8 key[16], u8 cmac_out[16])
 {
     size_t cmac_out_len;
@@ -165,12 +210,11 @@ void do_body_cmac(u8 *save_body, uint64_t body_size, u8 key[16], u8 cmac_out[16]
     CMAC_CTX_free(cmac);
 }
 
-void decrypt_save(u8* save_buf, u64 fsize, u32* lookup_table)
+void decrypt_save(u8* save_buf, u64 fsize, u32* lookup_table, int has_header)
 {
-    save_header *save_head = (save_header*)save_buf;
     save_cryptinfo* cryptinfo = (save_cryptinfo*)(save_buf + fsize - sizeof(save_cryptinfo));
-    u8* body = save_buf + sizeof(save_header);
-    uint64_t body_size = fsize - sizeof(save_header) - sizeof(save_cryptinfo);
+    u8* body = save_buf + (has_header ? sizeof(save_header) : 0);
+    uint64_t body_size = fsize - (has_header ? sizeof(save_header) : 0) - sizeof(save_cryptinfo);
     
     // Store iv
     u32 iv[4];
@@ -199,26 +243,34 @@ void decrypt_save(u8* save_buf, u64 fsize, u32* lookup_table)
     else
         printf("CMAC check passed!\n");
     
-    printf("Checking CRC32...\n");
-    u32 crc = crc32(body, body_size);
-    if(memcmp(&crc, &save_head->crc32, sizeof(crc)))
-        printf("CRC check failed!\n");
-    else
-        printf("CRC check passed!\n");
+	if (has_header)
+	{
+		save_header *save_head = (save_header*)save_buf;
+
+		printf("Checking CRC32...\n");
+		u32 crc = crc32(body, body_size);
+		if (memcmp(&crc, &save_head->crc32, sizeof(crc)))
+			printf("CRC check failed!\n");
+		else
+			printf("CRC check passed!\n");
+	}
     
     printf("Writing out...\n");
 }
 
-void encrypt_save(u8* save_buf, u64 fsize, u32* lookup_table)
+void encrypt_save(u8* save_buf, u64 fsize, u32* lookup_table, int has_header)
 {
-    save_header *save_head = (save_header*)save_buf;
     save_cryptinfo* cryptinfo = (save_cryptinfo*)(save_buf + fsize - sizeof(save_cryptinfo));
-    u8* body = save_buf + sizeof(save_header);
-    uint64_t body_size = fsize - sizeof(save_header) - sizeof(save_cryptinfo);
+    u8* body = save_buf + (has_header ? sizeof(save_header) : 0);
+    uint64_t body_size = fsize - (has_header ? sizeof(save_header) : 0) - sizeof(save_cryptinfo);
     
-    // fix up the CRC32 over the decrypted body
-    printf("Fixing up CRC32...\n");
-    putle32(&save_head->crc32, crc32(body, body_size));
+	if (has_header)
+	{
+		save_header *save_head = (save_header*)save_buf;
+		// fix up the CRC32 over the decrypted body
+		printf("Fixing up CRC32...\n");
+		putle32(&save_head->crc32, crc32(body, body_size));
+	}
     
     // generate random IV and seed, and add them to the save
     printf("Generating security data...\n");
@@ -342,19 +394,14 @@ int main(int argc, char* argv[])
     // 60,000,000 years of C error checking later, sanity-check save and mode
     
 	int code = 0;
+	int offset = 0;
 
 	if (mode == decrypt)
 	{
-		u32 version = getle32(&save_buf[0]);
-		if (!version || version > 1)
-		{
-			printf("Unrecognized save version %d!\n", version);
-			free(save_buf);
-			return -1;
-		}
+		u32* lut = get_lookup_table(in_file_name, fsize, (save_header*)save_buf, false, &offset);
 
-		decrypt_save(save_buf, fsize, get_lookup_table(in_file_name, fsize));
-		if (!file_put_contents(out_file_name, save_buf + 0x10, fsize - 0x40))
+		decrypt_save(save_buf, fsize, lut, offset);
+		if (!file_put_contents(out_file_name, save_buf + offset, fsize - 0x30 - offset))
 		{
 			code = -1;
 		}
@@ -363,13 +410,10 @@ int main(int argc, char* argv[])
 	{
 		save_header* header = (save_header*)save_buf;
 
-		header->product_version = 0x01;
-		header->develop_version = 0x0A;
-		header->crc32 = 0x00;
-		header->pad = 0x00;
+		u32* lut = get_lookup_table(in_file_name, fsize, (save_header*)save_buf, true, &offset);
 
-		encrypt_save(save_buf, fsize + 0x40, get_lookup_table(in_file_name, fsize + 0x40));
-		if (!file_put_contents(out_file_name, save_buf, fsize + 0x40))
+		encrypt_save(save_buf + (offset ? 0 : 0x10), fsize + 0x30 + offset, lut, offset);
+		if (!file_put_contents(out_file_name, save_buf + (offset ? 0 : 0x10), fsize + 0x30 + offset))
 		{
 			code = -1;
 		}
