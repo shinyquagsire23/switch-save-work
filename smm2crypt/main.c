@@ -20,9 +20,9 @@ typedef struct {
 } save_header;
 
 typedef struct {
-	u8 iv[16];
+	u32 iv[4];
 	u32 rand[4]; // random ctx used to generate keys
-	u8 aes_cmac[16];
+	u32 aes_cmac[4];
 } save_cryptinfo;
 
 struct mm_file_type
@@ -157,6 +157,16 @@ u32* get_lookup_table(const char* fileName, size_t size, save_header* header, bo
 	return forced_lookup_table;
 }
 
+void swap32(u32* a, u32* b)
+{
+	if (a && b)
+	{
+		u32 swap = *a;
+		*a = *b;
+		*b = swap;
+	}
+}
+
 u32 rand32(u32 rand[4])
 {
     u32 t = rand[0];
@@ -272,14 +282,25 @@ void encrypt_save(u8* save_buf, u64 fsize, u32* lookup_table, int has_header)
 		printf("Fixing up CRC32...\n");
 		putle32(&save_head->crc32, crc32(body, body_size));
 	}
-    
-    // generate random IV and seed, and add them to the save
-    printf("Generating security data...\n");
-    srand(time(NULL));
-    u32 rand_ctx[4];
-    u32 iv[4];
-    memcpy(iv, cryptinfo->iv, sizeof(iv));
-    memcpy(rand_ctx, cryptinfo->rand, sizeof(rand_ctx));
+
+	// generate random IV and seed, and add them to the save
+	printf("Generating security data...\n");
+	srand(time(NULL));
+	u32 rand_ctx[4];
+	u32 iv[4];
+
+	cryptinfo->rand[0] = rand();
+	cryptinfo->rand[1] = rand();
+	cryptinfo->rand[2] = rand();
+	cryptinfo->rand[3] = rand();
+
+	memcpy(cryptinfo->iv, cryptinfo->rand, sizeof(cryptinfo->iv));
+
+	swap32(&cryptinfo->iv[0], &cryptinfo->iv[1]);
+	swap32(&cryptinfo->iv[2], &cryptinfo->iv[3]);
+
+	memcpy(iv, cryptinfo->iv, sizeof(iv));
+	memcpy(rand_ctx, cryptinfo->rand, sizeof(rand_ctx));
     
     // generate keys
     u8 enc_key[16];
