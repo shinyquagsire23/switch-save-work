@@ -48,6 +48,7 @@ int deldir(const char* dir);
 
 // rewinds to 0 when done
 size_t get_fsize(FILE* f);
+bool file_put_contents(const char* file_name, const void* buffer, size_t size);
 // returns number of consecutive zero bytes from offset 0, up to max_len
 int get_zeroes(u8* data, int max_len);
 

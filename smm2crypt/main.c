@@ -7,6 +7,95 @@
 #include <openssl/cmac.h>
 
 #include "utils.h"
+#include "keys.h"
+
+u32 forced_lookup_table[64] = { 0 };
+
+struct mm_file_type
+{
+	char* name;
+	char* fileName;
+	size_t fileSize;
+	size_t offset;
+	uint32_t* key_table;
+};
+
+struct mm_file_type file_types[] = {
+	{ "save", "save.dat", 0xC000, 0x0, save_key_table },
+	{ "quest", "quest.dat", 0xC000, 0x0, quest_key_table },
+	{ "later", "later.dat", 0xC000, 0x0, later_key_table },
+	{ "replay", ".dat", 0x68000, 0x0, replay_key_table },
+	{ "network", "network.dat", 0x48000, 0x0, network_key_table },
+	{ "thumb", ".btl", 0x1C000, 0x0, thumb_key_table },
+	{ "course", ".bcd", 0x5C000, 0x10, course_key_table }
+};
+
+char ends_with(const char* a, const char* b)
+{
+	if (!a || !b)
+	{
+		return 0;
+	}
+
+	int lenA = strlen(a);
+	int lenB = strlen(b);
+
+	if (lenB > lenA)
+	{
+		return 0;
+	}
+
+	return strcmp(a + lenA - lenB, b) == 0;
+}
+
+/*struct mm_file_type* get_file_type(const char* fileName, size_t size)
+{
+	for (int i = 0; i < sizeof(file_types) / sizeof(struct mm_file_type); i++)
+	{
+		if (file_types[i].fileSize == size && ends_with(fileName, file_types[i].fileName))
+		{
+			return &file_types[i];
+		}
+	}
+	return NULL;
+}*/
+
+bool is_empty(const u8* ptr, size_t size)
+{
+	if (!ptr)
+	{
+		return true;
+	}
+
+	for (size_t i = 0; i < size; i++)
+	{
+		if (ptr[i])
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+u32* get_lookup_table(const char* fileName, size_t size)
+{
+	if (!is_empty(forced_lookup_table, sizeof(forced_lookup_table)))
+	{
+		printf("using supplied lookup table.\n");
+		return forced_lookup_table;
+	}
+
+	for (int i = 0; i < sizeof(file_types) / sizeof(struct mm_file_type); i++)
+	{
+		if (file_types[i].fileSize == size && ends_with(fileName, file_types[i].fileName))
+		{
+			printf("using %s lookup table.\n", file_types[i].name);
+			return file_types[i].key_table;
+		}
+	}
+
+	return forced_lookup_table;
+}
 
 u32 rand32(u32 rand[4])
 {
@@ -23,9 +112,7 @@ u32 rand32(u32 rand[4])
     return t;
 }
 
-u32 lookup_table[64] = {0};
-
-void generate_randkey(u32 rand[4], u8 key[16])
+void generate_randkey(u32 rand[4], u8 key[16], u32* lookup_table)
 {
     u32* key32 = (u32*)key;
     memset(key, 0, 16);
@@ -78,7 +165,7 @@ void do_body_cmac(u8 *save_body, uint64_t body_size, u8 key[16], u8 cmac_out[16]
     CMAC_CTX_free(cmac);
 }
 
-void decrypt_save(u8* save_buf, u64 fsize)
+void decrypt_save(u8* save_buf, u64 fsize, u32* lookup_table)
 {
     save_header *save_head = (save_header*)save_buf;
     save_cryptinfo* cryptinfo = (save_cryptinfo*)(save_buf + fsize - sizeof(save_cryptinfo));
@@ -96,8 +183,8 @@ void decrypt_save(u8* save_buf, u64 fsize)
     
     u8 enc_key[16];
     u8 auth_key[16];
-    generate_randkey(rand_ctx, enc_key);
-    generate_randkey(rand_ctx, auth_key);
+    generate_randkey(rand_ctx, enc_key, lookup_table);
+    generate_randkey(rand_ctx, auth_key, lookup_table);
     
     AES_KEY aes;
     AES_set_decrypt_key(enc_key, 128, &aes);
@@ -122,7 +209,7 @@ void decrypt_save(u8* save_buf, u64 fsize)
     printf("Writing out...\n");
 }
 
-void encrypt_save(u8* save_buf, u64 fsize)
+void encrypt_save(u8* save_buf, u64 fsize, u32* lookup_table)
 {
     save_header *save_head = (save_header*)save_buf;
     save_cryptinfo* cryptinfo = (save_cryptinfo*)(save_buf + fsize - sizeof(save_cryptinfo));
@@ -144,8 +231,8 @@ void encrypt_save(u8* save_buf, u64 fsize)
     // generate keys
     u8 enc_key[16];
     u8 auth_key[16];
-    generate_randkey(rand_ctx, enc_key);
-    generate_randkey(rand_ctx, auth_key);
+    generate_randkey(rand_ctx, enc_key, lookup_table);
+    generate_randkey(rand_ctx, auth_key, lookup_table);
     
     printf("Generating save body CMAC...\n");
     // calculate AES-CMAC of decrypted data and write it to the save
@@ -162,19 +249,19 @@ void encrypt_save(u8* save_buf, u64 fsize)
 
 typedef enum {encrypt, decrypt} prog_mode;
 
+int print_usage(int argc, char* argv[])
+{
+	printf("Usage: %s [-e|-d] [crypt_lut.bin?] [save] [save_out]\n"
+		"-e: encrypt a decrypted save\n"
+		"-d: decrypt an encrypted save\n", argv[0]);
+	return -1;
+}
+
 int main(int argc, char* argv[])
 {
     setbuf(stdout, NULL);
     printf("Super Mario Maker 2 save crypt tool v1.0\n"
         "By WulfyStylez/SALT 2k19\n\n");
-    
-    if(argc != 5)
-    {
-        printf("Usage: %s [-e|-d] [crypt_lut.bin] [save] [save_out]\n"
-               "-e: encrypt a decrypted save\n"
-               "-d: decrypt an encrypted save\n", argv[0]);
-        return -1;
-    }
     
     // check mode
     prog_mode mode;
@@ -188,32 +275,55 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    FILE* f_lut = fopen(argv[2], "rb");
-    if(f_lut == NULL)
-    {
-        printf("Failed to open file %s for reading!\n", argv[2]);
-        return -1;
-    }
-    
-    size_t lut_read = fread(&lookup_table, 1, 0x100, f_lut);
-    if (lut_read != 0x100)
-    {
-        printf("Lookup table too small! Got 0x%zx bytes instead of 0x100\n", lut_read);
-        return -1;
-    }
-    fclose(f_lut);
+	const char* in_file_name = NULL;// "course_data_120.bcd";
+	const char* out_file_name = NULL;// "course_data_120.bcd.dec";
+	const char* lut_file_name = NULL;
 
-    FILE* f_in = fopen(argv[3], "rb");
+	if (argc == 5)
+	{
+		lut_file_name = argv[2];
+		in_file_name = argv[3];
+		out_file_name = argv[4];
+	}
+	else if (argc == 4)
+	{
+		in_file_name = argv[2];
+		out_file_name = argv[3];
+	}
+	else
+	{
+		return print_usage(argc, argv);
+	}
+
+	if (lut_file_name)
+	{
+		FILE* f_lut = fopen(lut_file_name, "rb");
+		if (f_lut == NULL)
+		{
+			printf("Failed to open file %s for reading!\n", lut_file_name);
+			return -1;
+		}
+
+		size_t lut_read = fread(&forced_lookup_table, 1, 0x100, f_lut);
+		if (lut_read != 0x100)
+		{
+			printf("Lookup table too small! Got 0x%zx bytes instead of 0x100\n", lut_read);
+			return -1;
+		}
+		fclose(f_lut);
+	}
+
+    FILE* f_in = fopen(in_file_name, "rb");
     if(f_in == NULL)
     {
-        printf("Failed to open file %s for reading!\n", argv[3]);
+        printf("Failed to open file %s for reading!\n", in_file_name);
         return -1;
     }
     
     size_t fsize = get_fsize(f_in);
     
     // always malloc the larger size so we can safely append to v0 saves
-    u8* save_buf = malloc(fsize + 0x100);
+    u8* save_buf = malloc(fsize + 0x100 + 0x40);
     if(save_buf == NULL)
     {
         printf("Failed to allocate %d bytes for reading game save!\n", fsize + 0x100);
@@ -221,7 +331,7 @@ int main(int argc, char* argv[])
         return -1;
     }
     
-    size_t read_size = fread(save_buf, 1, fsize, f_in);
+    size_t read_size = fread(save_buf + (mode == encrypt ? 0x10 : 0x00), 1, fsize, f_in);
     fclose(f_in);
     if(read_size != fsize)
     {
@@ -230,36 +340,41 @@ int main(int argc, char* argv[])
     }
     
     // 60,000,000 years of C error checking later, sanity-check save and mode
-    u32 version = getle32(&save_buf[0]);
-    if(!version || version > 1)
-    {
-        printf("Unrecognized save version %d!\n", version);
-        free(save_buf);
-        return -1;
-    }
     
-    if(mode == decrypt)
-        decrypt_save(save_buf, fsize);
-    else if(mode == encrypt)
-        encrypt_save(save_buf, fsize);
-    
-    FILE* f_out = fopen(argv[4], "wb");
-    if(f_out == NULL)
-    {
-        printf("Failed to open file %s for writing!\n", argv[4]);
-        free(save_buf);
-        return -1;
-    }
-    
-    size_t size_to_write = fsize;
-    size_t size_written = fwrite(save_buf, 1, size_to_write, f_out);
-    fclose(f_out);
-    free(save_buf);
-    if(size_written != size_to_write)
-    {
-        printf("Failed to write to output file!\n");
-        return -1;
-    }
-    
+	int code = 0;
+
+	if (mode == decrypt)
+	{
+		u32 version = getle32(&save_buf[0]);
+		if (!version || version > 1)
+		{
+			printf("Unrecognized save version %d!\n", version);
+			free(save_buf);
+			return -1;
+		}
+
+		decrypt_save(save_buf, fsize, get_lookup_table(in_file_name, fsize));
+		if (!file_put_contents(out_file_name, save_buf + 0x10, fsize - 0x40))
+		{
+			code = -1;
+		}
+	}
+	else if (mode == encrypt)
+	{
+		save_header* header = (save_header*)save_buf;
+
+		header->product_version = 0x01;
+		header->develop_version = 0x0A;
+		header->crc32 = 0x00;
+		header->pad = 0x00;
+
+		encrypt_save(save_buf, fsize + 0x40, get_lookup_table(in_file_name, fsize + 0x40));
+		if (!file_put_contents(out_file_name, save_buf, fsize + 0x40))
+		{
+			code = -1;
+		}
+	}
+
+	free(save_buf);    
     printf("Done!\n");
 }
