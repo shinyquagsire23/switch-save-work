@@ -13,6 +13,41 @@
 #include <sys/types.h>
 #endif
 
+#ifdef _MSC_VER
+#define fseeko fseek
+#define ftello ftell
+
+int vasprintf(char **strp, const char *fmt, va_list ap)
+{
+	int len = _vscprintf(fmt, ap);
+	if (len == -1) {
+		return -1;
+	}
+	size_t size = (size_t)len + 1;
+	char *str = malloc(size);
+	if (!str) {
+		return -1;
+	}
+
+	int r = vsprintf_s(str, len + 1, fmt, ap);
+	if (r == -1) {
+		free(str);
+		return -1;
+	}
+	*strp = str;
+	return r;
+}
+
+int asprintf(char **strp, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = vasprintf(strp, fmt, ap);
+	va_end(ap);
+	return r;
+}
+#endif
+
 u32 crc32(u8 *message, u32 len)
 {
     int i, j;
@@ -321,6 +356,26 @@ size_t get_fsize(FILE* f)
     size_t fsize = ftello(f);
     rewind(f);
     return fsize;
+}
+
+bool file_put_contents(const char* file_name, const void* buffer, size_t size)
+{
+	FILE* f_out = fopen(file_name, "wb");
+	if (f_out == NULL)
+	{
+		printf("Failed to open file %s for writing!\n", file_name);
+		return false;
+	}
+
+	size_t size_to_write = size;
+	size_t size_written = fwrite(buffer, 1, size_to_write, f_out);
+	fclose(f_out);
+	if (size_written != size_to_write)
+	{
+		printf("Failed to write to output file!\n");
+		return false;
+	}
+	return true;
 }
 
 int get_zeroes(u8* data, int max_len)
