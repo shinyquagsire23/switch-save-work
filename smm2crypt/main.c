@@ -16,7 +16,7 @@ typedef struct {
 	u32 product_version;
 	u32 develop_version;
 	u32 crc32;
-	u32 pad;
+	u32 magic;
 } save_header;
 
 typedef struct {
@@ -31,18 +31,19 @@ struct mm_file_type
 	char* fileName;
 	size_t fileSize;
 	u32 develop_version;
+	u32 magic;
 	u32* key_table;
 };
 
 struct mm_file_type file_types[] = {
-	{ "save", "save.dat", 0xC000, 0x0B, save_key_table },
-	{ "quest", "quest.dat", 0xC000, 0x01, quest_key_table },
-	{ "later", "later.dat", 0xC000, 0x0A, later_key_table },
-	{ "replay", ".dat", 0x68000, 0x0, replay_key_table },
-	{ "network", "network.dat", 0x48000, 0x08, network_key_table },
-	{ "thumb", ".btl", 0x1C000, 0x0, thumb_key_table },
-	{ "thumb", ".jpg", 0x1C000, 0x0, thumb_key_table },
-	{ "course", ".bcd", 0x5C000, 0x10, course_key_table }
+	{ "save", "save.dat", 0xC000, 0x0B, 0x00, save_key_table },
+	{ "quest", "quest.dat", 0xC000, 0x01, 0x00, quest_key_table },
+	{ "later", "later.dat", 0xC000, 0x0A, 0x00, later_key_table },
+	{ "replay", ".dat", 0x68000, 0x00, 0x00, replay_key_table },
+	{ "network", "network.dat", 0x48000, 0x08, 0x00, network_key_table },
+	{ "thumb", ".btl", 0x1C000, 0x00, 0x00, thumb_key_table },
+	{ "thumb", ".jpg", 0x1C000, 0x00, 0x00, thumb_key_table },
+	{ "course", ".bcd", 0x5C000, 0x10, 0x4C444353, course_key_table }
 };
 
 char ends_with(const char* a, const char* b)
@@ -114,7 +115,7 @@ u32* get_lookup_table(const char* fileName, size_t size, save_header* header, bo
 				header->product_version = 1;
 				header->develop_version = file_types[i].develop_version;
 				header->crc32 = 0;
-				header->pad = 0;
+				header->magic = file_types[i].magic;
 			}
 
 			if (file_types[i].develop_version && offset)
